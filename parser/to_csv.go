@@ -16,12 +16,16 @@ import (
 	events "github.com/markus-wa/demoinfocs-golang/v2/pkg/demoinfocs/events"
 )
 
-// Defines amount of frames to collect around kills
+// File paths
+var dest = "../model/other.csv"
+var source = "./demos/other/"
+
+// Defines amount of frames to collect around attacks
 const samplesPerSecond = 32
-const secondsBeforeKill = 2
-const secondsAfterKill = 32.0 / 32
-const secondsPerKill = secondsBeforeKill + secondsAfterKill
-const samplesPerKill = int(secondsPerKill * samplesPerSecond)
+const secondsBeforeAttack = 1
+const secondsAfterAttack = 1
+const secondsPerAttack = secondsBeforeAttack + secondsAfterAttack
+const samplesPerAttack = int(samplesPerSecond * secondsPerAttack)
 
 // PlayerData stores all data of a player in a single frame.
 type PlayerData struct {
@@ -34,13 +38,13 @@ type PlayerData struct {
 	health    int
 }
 
-// KillTime stores the frames around a kill.
-type KillTime struct {
-	killer     int
-	victim     int
-	startFrame int
-	killFrame  int
-	endFrame   int
+// AttackTime marks when an attacker shot a victim
+type AttackTime struct {
+	attacker    int
+	victim      int
+	startFrame  int
+	attackFrame int
+	endFrame    int
 }
 
 // FireFrameKey is a key to a dictionary that marks
@@ -50,131 +54,153 @@ type FireFrameKey struct {
 	frame   int
 }
 
-// KillData stores the features of a single sample fed into the model.
-type KillData struct {
-	// Whether the killer used an aimbot during the kill
-	killerAimbot bool
+// AttackData stores the features of a single sample fed into the model.
+type AttackData struct {
+	// Whether the attacker used an aimbot during the attack
+	attackerAimbot bool
 
-	// One-hot encoding of killing gun
+	// One-hot encoding of attacking gun
 	weaponAK47 bool
 	weaponM4A4 bool
 	weaponAWP  bool
 
 	// Viewangle deltas
-	killerDeltaYaw   [samplesPerKill]float32
-	killerDeltaPitch [samplesPerKill]float32
+	attackerDeltaYaw   [samplesPerAttack]float32
+	attackerDeltaPitch [samplesPerAttack]float32
 
-	// Angles between the killer's crosshair and the victim
-	crosshairToVictimYaw   [samplesPerKill]float32
-	crosshairToVictimPitch [samplesPerKill]float32
+	// Angles between the attacker's crosshair and the victim
+	crosshairToVictimYaw   [samplesPerAttack]float32
+	crosshairToVictimPitch [samplesPerAttack]float32
 
-	victimDistance  [samplesPerKill]float32
-	killerCrouching [samplesPerKill]bool
-	victimCrouching [samplesPerKill]bool
-	killerFiring    [samplesPerKill]bool
-	victimHealth    [samplesPerKill]int
+	victimDistance    [samplesPerAttack]float32
+	attackerCrouching [samplesPerAttack]bool
+	victimCrouching   [samplesPerAttack]bool
+	attackerFiring    [samplesPerAttack]bool
+
+	attackerHealth [samplesPerAttack]int
+	victimHealth   [samplesPerAttack]int
+
+	attackerViewVector     [samplesPerAttack]r3.Vector
+	attackerToVictimVector [samplesPerAttack]r3.Vector
+
+	//attackerX [samplesPerAttack]float32
+	//victimX   [samplesPerAttack]float32
 }
 
 // Marks guns that the model will be trained on
 // TODO: Test model on different sets of guns.
 var validGuns = map[string]bool{
 	"AK-47": true,
-	"M4A4":  true,
-	"AWP":   true,
+	//"M4A4":  true,
+	//"AWP":   true,
 	//"M4A1": true,
 	//"AUG":    true,
 	//"SG 553": true,
 }
 
 // Stores data to be fed into model
-var modelData = []KillData{}
+var modelData = []AttackData{}
 
 func main() {
-	dir := "./demos/labeled/"
-	files, err := ioutil.ReadDir(dir)
+	//source = "E:/demos/shadowkeeper/"
+
+	files, err := ioutil.ReadDir(source)
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, f := range files {
 		fmt.Println(f.Name())
-		parseDemo(dir + f.Name())
+		parseDemo(source, f.Name())
 	}
 	csvExport()
 }
 
-func parseDemo(path string) {
-	// Times when a player is killed by a valid gun
-	var killTimes = []KillTime{}
+func parseDemo(source string, name string) {
+	// Times when a player is attacked by a valid gun
+	var attackTimes = []AttackTime{}
 	// Marks if a player is firing at a given frame.
 	var fireFrames = map[FireFrameKey]bool{}
-	// Marks frames surrounding kills that should be gathered
+	// Marks frames surrounding attacks that should be gathered
 	// for easier processing into model inputs
 	var isMarked = map[int]bool{}
 	// Stores the PlayerData for each player for each marked framed
 	var markedFrameData = map[int]map[int]PlayerData{}
 	// Marks if the demo was generated with an aimbot
-	aimbot := strings.Contains(path, "_aimbot_")
+	aimbot := strings.Contains(name, "_aimbot_")
 
-	f, err := os.Open(path)
+	f, err := os.Open(source + name)
 	defer f.Close()
 	checkError(err)
 	p := dem.NewParser(f)
 
+	h, err := p.ParseHeader()
+	FrameRate := h.FrameRate()
+
 	// Calculate the demo framerate with some hacks
 	tick := -1
-	for !(10 < tick && tick < 100) {
+	for !(2900 < tick && tick < 3000) {
 		_, err = p.ParseNextFrame()
-		checkError(err)
 		tick = p.GameState().IngameTick()
 	}
-	_, err = p.ParseNextFrame()
 	checkError(err)
+	iters := 10
+	for i := 0; i < iters; i++ {
+		_, err = p.ParseNextFrame()
+		checkError(err)
+	}
 	nextTick := p.GameState().IngameTick()
-	FrameRate := int(p.TickRate()) / (nextTick - tick)
 
-	var framesBeforeKill int
-	var framesAfterKill int
-	if FrameRate == 32 {
-		framesBeforeKill = secondsBeforeKill * 32
-		framesAfterKill = secondsAfterKill * 32
-	} else if FrameRate == 64 {
-		framesBeforeKill = secondsBeforeKill * 64
-		framesAfterKill = secondsAfterKill * 64
-	} else if FrameRate == 128 {
-		framesBeforeKill = secondsBeforeKill * 128
-		framesAfterKill = secondsAfterKill * 128
+	TicksPerFrame := float64(nextTick-tick) / float64(iters)
+	FrameRate2 := p.TickRate() / TicksPerFrame
+
+	if FrameRate == 0 {
+		FrameRate = FrameRate2
+	}
+
+	var framesBeforeAttack int
+	var framesAfterAttack int
+	if (math.Abs(FrameRate-32.0) < 1) && (FrameRate2 == 32) {
+		framesBeforeAttack = secondsBeforeAttack * 32
+		framesAfterAttack = secondsAfterAttack * 32
+	} else if (math.Abs(FrameRate-64.0) < 4) && (FrameRate2 == 64) {
+		framesBeforeAttack = secondsBeforeAttack * 64
+		framesAfterAttack = secondsAfterAttack * 64
+	} else if (math.Abs(FrameRate-128) < 4) && (FrameRate2 == 128) {
+		framesBeforeAttack = secondsBeforeAttack * 128
+		framesAfterAttack = secondsAfterAttack * 128
 	} else {
-		println("Invalid frame rate: ", FrameRate)
+		println("Invalid frame rate: ", FrameRate, FrameRate2)
 		return
 	}
-	framesPerKill := framesBeforeKill + framesAfterKill
-	framesPerSample := int(framesPerKill / samplesPerKill)
+
+	framesPerAttack := framesBeforeAttack + framesAfterAttack
+	framesPerSample := int(framesPerAttack / samplesPerAttack)
 	println("Frames per sample ", framesPerSample)
 
 	// First pass.
 
-	// Get frame times of kills with valid guns,
+	// Get frame times of attacks with valid guns,
 	// and mark surrounding frames for retrieval.
-	killCount := 0
-	p.RegisterEventHandler(func(e events.Kill) {
+	attackCount := 0
+	p.RegisterEventHandler(func(e events.PlayerHurt) {
 		if !validGuns[e.Weapon.String()] {
 			return
 		}
-		if e.Killer.SteamID64 == 0 { // Ignore bots
+		if e.Attacker.SteamID64 == 0 { // Ignore bots
 			return
 		}
 
-		killCount++
-		killFrame := p.CurrentFrame()
-		start := killFrame - framesBeforeKill
-		end := killFrame + framesAfterKill
+		attackCount++
+		attackFrame := p.CurrentFrame()
+		start := attackFrame - framesBeforeAttack
+		end := attackFrame + framesAfterAttack
 		for frame := start; frame < end; frame++ {
 			isMarked[frame] = true
 		}
 		isMarked[start-framesPerSample] = true // For first sample delta angles
-		newKillTime := KillTime{
-			e.Killer.UserID, e.Victim.UserID, start, killFrame, end}
-		killTimes = append(killTimes, newKillTime)
+		new := AttackTime{
+			e.Attacker.UserID, e.Player.UserID, start, attackFrame, end}
+		attackTimes = append(attackTimes, new)
 	})
 
 	// Track frames where a player fires a weapon
@@ -186,97 +212,96 @@ func parseDemo(path string) {
 		}
 	})
 	err = p.ParseToEnd()
-	fmt.Printf("Kills with valid guns: %d\n", killCount)
-	checkError(err)
-	f.Close()
+	fmt.Printf("Valid attacks: %d\n", attackCount)
 
 	// Second pass.
 
 	// Extract player data from marked frames
-	f, err = os.Open(path)
+	f, err = os.Open(source + name)
 	p = dem.NewParser(f)
 	for ok := true; ok; ok, err = p.ParseNextFrame() {
 		checkError(err)
 		frame := p.CurrentFrame()
+
 		if !isMarked[frame] {
 			continue
 		}
+
 		var players = map[int]PlayerData{}
 		gs := p.GameState()
 		for _, player := range gs.Participants().Playing() {
-			if player.ActiveWeapon() == nil {
-				continue
-			}
 			players[player.UserID] = extractPlayerData(frame, player, fireFrames)
 		}
 		markedFrameData[frame] = players
 	}
-	checkError(err)
 
-	// Extract each kill's KillData, and add it to modelData
-	for _, kill := range killTimes {
-		weapon := markedFrameData[kill.killFrame][kill.killer].weapon
-		killData := KillData{
-			killerAimbot: aimbot,
-			weaponAK47:   weapon == "AK-47",
-			weaponM4A4:   weapon == "M4A4",
-			weaponAWP:    weapon == "AWP",
+	// Extract each attack's AttackData, and add it to modelData
+	for _, attack := range attackTimes {
+		weapon := markedFrameData[attack.attackFrame][attack.attacker].weapon
+		attackData := AttackData{
+			attackerAimbot: aimbot,
+			weaponAK47:     weapon == "AK-47",
+			weaponM4A4:     weapon == "M4A4",
+			weaponAWP:      weapon == "AWP",
 		}
 
-		prevFrame := kill.startFrame - framesPerSample
-		prevKillerYaw := markedFrameData[prevFrame][kill.killer].yaw
-		prevKillerPitch := markedFrameData[prevFrame][kill.killer].pitch
+		prevFrame := attack.startFrame - framesPerSample
+		prevAttackerYaw := markedFrameData[prevFrame][attack.attacker].yaw
+		prevAttackerPitch := markedFrameData[prevFrame][attack.attacker].pitch
 
-		for sample := 0; sample < samplesPerKill; sample++ {
-			frame := framesPerSample*sample + kill.startFrame
-			killer := markedFrameData[frame][kill.killer]
-			victim := markedFrameData[frame][kill.victim]
+		for sample := 0; sample < samplesPerAttack; sample++ {
+			frame := framesPerSample*sample + attack.startFrame
+			attacker := markedFrameData[frame][attack.attacker]
+			victim := markedFrameData[frame][attack.victim]
 
-			killerYaw := killer.yaw
-			killerPitch := killer.pitch
-			killData.killerDeltaYaw[sample] = normalizeAngle(
-				killerYaw - prevKillerYaw)
-			killData.killerDeltaPitch[sample] = killerPitch - prevKillerPitch
-			prevKillerYaw = killerYaw
-			prevKillerPitch = killerPitch
+			attackerYaw := attacker.yaw
+			attackerPitch := attacker.pitch
+			attackData.attackerDeltaYaw[sample] = normalizeAngle(
+				attackerYaw - prevAttackerYaw)
+			attackData.attackerDeltaPitch[sample] = attackerPitch - prevAttackerPitch
+			prevAttackerYaw = attackerYaw
+			prevAttackerPitch = attackerPitch
 
-			killerToVictim := victim.position.Sub(killer.position)
-			dX := killerToVictim.X
-			dY := killerToVictim.Y
-			dZ := killerToVictim.Z
-			killerToVictimYaw := 180 / math.Pi * float32(math.Atan2(dY, dX))
-			killerToVictimPitch := 180 / math.Pi * float32(math.Atan2(
+			attackerToVictim := victim.position.Sub(attacker.position)
+			attackData.attackerToVictimVector[sample] = attackerToVictim.Normalize()
+
+			dX := attackerToVictim.X
+			dY := attackerToVictim.Y
+			dZ := attackerToVictim.Z
+			attackerToVictimYaw := 180 / math.Pi * float32(math.Atan2(dY, dX))
+			attackerToVictimPitch := 180 / math.Pi * float32(math.Atan2(
 				math.Sqrt(dX*dX+dY*dY),
 				dZ))
-			// Smallest angle between killerToVictimYaw and killerYaw
-			killData.crosshairToVictimYaw[sample] =
-				normalizeAngle(killerToVictimYaw - killerYaw)
-			killData.crosshairToVictimPitch[sample] =
-				killerToVictimPitch - killerPitch
 
-			killData.victimDistance[sample] = float32(killerToVictim.Norm())
-			killData.killerCrouching[sample] = killer.crouching
-			killData.victimCrouching[sample] = victim.crouching
-			killData.killerFiring[sample] = killer.firing
-			killData.victimHealth[sample] = victim.health
+			// Smallest angle between attackerToVictimYaw and attackerYaw
+			attackData.crosshairToVictimYaw[sample] =
+				normalizeAngle(attackerToVictimYaw - attackerYaw)
+			attackData.crosshairToVictimPitch[sample] =
+				attackerToVictimPitch - attackerPitch
+
+			attackData.victimDistance[sample] = float32(attackerToVictim.Norm())
+
+			attackData.attackerCrouching[sample] = attacker.crouching
+			attackData.victimCrouching[sample] = victim.crouching
+			attackData.attackerFiring[sample] = attacker.firing
+
+			attackData.attackerHealth[sample] = attacker.health
+			attackData.victimHealth[sample] = victim.health
+
+			attackerYaw64 := float64(math.Pi / 180 * attackerYaw)
+			attackerPitch64 := float64(math.Pi / 180 * attackerPitch)
+			attackData.attackerViewVector[sample] = r3.Vector{
+				math.Cos(attackerYaw64) * math.Sin(attackerPitch64),
+				math.Sin(attackerYaw64) * math.Sin(attackerPitch64),
+				math.Cos(attackerPitch64)}
+
+			//attackData.attackerX[sample] = float32(attacker.position.X)
+			//attackData.victimX[sample] = float32(victim.position.X)
 		}
-		modelData = append(modelData, killData)
+		// A player teleported. Throw away the data.
+		modelData = append(modelData, attackData)
 	}
-
-	//kill := modelData[6]
-	//for i := 0; i < samplesPerKill; i++ {
-	//	fmt.Printf(
-	//		"(%.3f %.3f) ",
-	//		kill.crosshairToVictimPitch[i], kill.crosshairToVictimYaw[i])
-	//	fmt.Printf(
-	//		"(%.3f %.3f) ",
-	//		kill.killerDeltaPitch[i], kill.killerDeltaYaw[i])
-	//	fmt.Printf(" %d ", kill.victimHealth[i])
-	//	fmt.Printf(" %t ", kill.killerFiring[i])
-	//	//fmt.Printf("%t ", kill.killerCrouching[i])
-	//	//fmt.Printf("%d\n", kill.victimHealth[i])S
-	//	println(i)
-	//}
+	f.Close()
 }
 
 func extractPlayerData(
@@ -287,8 +312,14 @@ func extractPlayerData(
 	fixedPitch := float32(math.Mod(
 		float64(player.ViewDirectionY())+90,
 		180))
+
+	weapon := ""
+	if player.ActiveWeapon() != nil {
+		weapon = player.ActiveWeapon().String()
+	}
+
 	return PlayerData{
-		player.ActiveWeapon().String(),
+		weapon,
 		player.LastAlivePosition,
 		player.ViewDirectionX(),
 		fixedPitch,
@@ -298,15 +329,15 @@ func extractPlayerData(
 }
 
 func csvExport() error {
-	file, err := os.OpenFile("./aim.csv", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 
 	writer := csv.NewWriter(file)
 
-	for _, killData := range modelData {
-		err := writer.Write(killToString(killData))
+	for _, attackData := range modelData {
+		err := writer.Write(attackToString(attackData))
 		if err != nil {
 			return err
 		}
@@ -317,31 +348,47 @@ func csvExport() error {
 	return nil
 }
 
-func killToString(data KillData) []string {
+func attackToString(data AttackData) []string {
 	var out []string
 
 	var aimbot int
-	if data.killerAimbot {
+	if data.attackerAimbot {
 		aimbot = 1
 	} else {
 		aimbot = 0
 	}
 	out = append(out, fmt.Sprintf("%d", aimbot))
 
-	for i := 0; i < samplesPerKill; i++ {
-		out = append(out, fmt.Sprintf("%.3f", data.killerDeltaYaw[i]))
-		out = append(out, fmt.Sprintf("%.3f", data.killerDeltaPitch[i]))
+	for i := 0; i < samplesPerAttack; i++ {
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerViewVector[i].X))
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerViewVector[i].Y))
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerViewVector[i].Z))
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerToVictimVector[i].X))
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerToVictimVector[i].Y))
+		//out = append(out, fmt.Sprintf("%.3f", data.attackerToVictimVector[i].Z))
+		//out = append(out, fmt.Sprintf("%.0f", data.victimDistance[i]))
+		out = append(out, fmt.Sprintf("%.3f", data.attackerDeltaYaw[i]))
+		out = append(out, fmt.Sprintf("%.3f", data.attackerDeltaPitch[i]))
 		out = append(out, fmt.Sprintf("%.3f", data.crosshairToVictimYaw[i]))
 		out = append(out, fmt.Sprintf("%.3f", data.crosshairToVictimPitch[i]))
-		out = append(out, fmt.Sprintf("%.0f", data.victimDistance[i]))
-		var firing int
-		if data.killerFiring[i] {
-			firing = 1
+
+		if data.attackerFiring[i] {
+			out = append(out, fmt.Sprintf("%d", 1))
 		} else {
-			firing = 0
+			out = append(out, fmt.Sprintf("%d", 0))
 		}
-		out = append(out, fmt.Sprintf("%d", firing))
-		out = append(out, fmt.Sprintf("%d", int(data.victimHealth[i])))
+
+		if data.attackerHealth[i] == 0 {
+			out = append(out, fmt.Sprintf("%d", 1))
+		} else {
+			out = append(out, fmt.Sprintf("%d", 0))
+		}
+
+		if data.victimHealth[i] == 0 {
+			out = append(out, fmt.Sprintf("%d", 1))
+		} else {
+			out = append(out, fmt.Sprintf("%d", 0))
+		}
 	}
 	return out
 }
