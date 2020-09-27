@@ -26,4 +26,5 @@ Test accuracy on data from a different player using the same cheat:
 
 ### Long-term Goals
 - Self-/semi-supervision
+  - Multi-task with player skill modeling
 - Scale
