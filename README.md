@@ -24,6 +24,8 @@ On the bright side, the model is per-engagement, not per player. So one might be
 
 Overall, I think it's quite difficult to detect legit aim assistance with the resources of a single engineer and a few community server owners. I think it's even difficult for humans to detect it, and I hope to post results on human benchmarks in a few weeks. In the future, I think I will try to incrementally improve the detection of rage and semi-rage aim assistance.
 
+Lastly, to make an actual impact, I need to integrate with and improve an existing ban pipeline. 
+
 ### TODO
 - More feature engineering
 - Model other cheats
